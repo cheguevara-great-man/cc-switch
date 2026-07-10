@@ -174,7 +174,17 @@ fn merge_tool_call_snapshots(
             // overwrite would drop it, so the shadow turn we record (and
             // later replay) would be missing `thoughtSignature` and the
             // upstream would reject the follow-up for invalid signature.
-            if tool_call.thought_signature.is_none() {
+            //
+            // Also guard against empty-string signatures: some Gemini relays
+            // serialize absent signatures as `"thoughtSignature": ""` rather
+            // than omitting the field. An empty string must be treated as
+            // "missing" so that a previously-captured non-empty signature is
+            // not silently erased.
+            let incoming_sig_is_empty = tool_call
+                .thought_signature
+                .as_deref()
+                .map_or(true, |s| s.is_empty());
+            if incoming_sig_is_empty {
                 tool_call
                     .thought_signature
                     .clone_from(&tool_call_snapshots[index].thought_signature);
@@ -1049,6 +1059,45 @@ mod tests {
         assert_eq!(
             shadow["parts"][0]["thoughtSignature"], "sig-keep",
             "prior thoughtSignature must survive a later chunk that omits it: {shadow}"
+        );
+    }
+
+    /// Empty-string thought_signature must NOT overwrite a previously
+    /// captured non-empty signature. Some Gemini relays serialize absent
+    /// signatures as `"thoughtSignature": ""` rather than omitting the
+    /// field. Without this guard, a later chunk with an empty-string
+    /// signature would erase the valid signature from an earlier chunk.
+    #[test]
+    fn empty_string_signature_does_not_overwrite_valid_signature() {
+        let store = Arc::new(GeminiShadowStore::with_limits(8, 4));
+        collect_stream_output_with_shadow(
+            vec![
+                // Chunk 1: carries a valid non-empty thoughtSignature
+                "data: {\"responseId\":\"r-empty-sig\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"call_e1\",\"name\":\"default_api:shell_command\",\"args\":{\"command\":\"ls\"}},\"thoughtSignature\":\"valid-sig-keep-me\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":6}}\n\n",
+                // Chunk 2: cumulative snapshot with empty-string thoughtSignature
+                // (some Gemini relays serialize absent sig this way)
+                "data: {\"responseId\":\"r-empty-sig\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"call_e1\",\"name\":\"default_api:shell_command\",\"args\":{\"command\":\"ls\",\"timeout\":30}},\"thoughtSignature\":\"\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":9}}\n\n",
+            ],
+            store.clone(),
+            "provider-empty",
+            "session-empty",
+        );
+
+        let shadow = store
+            .latest_assistant_content("provider-empty", "session-empty")
+            .expect("shadow must be recorded");
+        assert_eq!(
+            shadow["parts"][0]["thoughtSignature"], "valid-sig-keep-me",
+            "valid signature must survive a later chunk with empty-string signature"
+        );
+
+        let tool_calls = store
+            .latest_tool_calls("provider-empty", "session-empty")
+            .expect("tool calls recorded");
+        assert_eq!(
+            tool_calls[0].thought_signature.as_deref(),
+            Some("valid-sig-keep-me"),
+            "tool_calls metadata must also retain the valid signature"
         );
     }
 }
