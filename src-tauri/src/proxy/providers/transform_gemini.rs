@@ -665,17 +665,26 @@ fn convert_message_content_to_parts(
                     function_call["id"] = json!(id);
                 }
 
+                let mut part = json!({ "functionCall": function_call });
+
                 // Re-attach the thought_signature that Gemini originally
                 // associated with this functionCall.  The Anthropic format
                 // strips it from the tool_use block, but Gemini requires it
                 // on every functionCall in a multi-turn tool-use exchange.
                 // Without replaying the stored signature the upstream may
                 // reject with "missing a `thought_signature`".
+                //
+                // IMPORTANT: thought_signature is a PART-level field in the
+                // Gemini API — it lives alongside functionCall, not inside it.
+                // Placing it inside functionCall causes Gemini to reject the
+                // request with HTTP 400 "missing a thought_signature".
                 if let Some(sig) = thought_signature_by_id.get(id) {
-                    function_call["thoughtSignature"] = json!(sig);
+                    if !sig.is_empty() {
+                        part["thoughtSignature"] = json!(sig);
+                    }
                 }
 
-                parts.push(json!({ "functionCall": function_call }));
+                parts.push(part);
             }
             "tool_result" => {
                 let tool_use_id = block
@@ -2306,5 +2315,471 @@ mod tests {
                 .is_none(),
             "functionResponse.id must also be omitted for synthesized ids"
         );
+    }
+
+    // ================================================================
+    // thought_signature preservation tests
+    // ================================================================
+
+    /// Test A: Non-streaming single tool call —
+    /// thought_signature must be at PART level, not inside functionCall.
+    #[test]
+    fn thought_signature_placed_at_part_level_not_inside_function_call() {
+        let store = GeminiShadowStore::with_limits(8, 4);
+        // Record a shadow turn with thought_signature for call_1
+        store.record_assistant_turn(
+            "provider-a",
+            "session-1",
+            json!({
+                "parts": [{
+                    "functionCall": {
+                        "id": "call_1",
+                        "name": "default_api:get_goal",
+                        "args": {}
+                    },
+                    "thoughtSignature": "sig-get-goal-abc123"
+                }]
+            }),
+            vec![GeminiToolCallMeta::new(
+                Some("call_1"),
+                "default_api:get_goal",
+                json!({}),
+                Some("sig-get-goal-abc123"),
+            )],
+        );
+
+        // Next turn: Codex sends back tool_result for call_1
+        let input = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "default_api:get_goal",
+                            "input": {}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "{\"goal\": \"fix bug\"}"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let result = anthropic_to_gemini_with_shadow(
+            input,
+            Some(&store),
+            Some("provider-a"),
+            Some("session-1"),
+        )
+        .unwrap();
+
+        let part = &result["contents"][0]["parts"][0];
+        let fc = &part["functionCall"];
+        assert_eq!(fc["name"], "default_api:get_goal");
+        // thought_signature must be at PART level, NOT inside functionCall
+        assert!(
+            fc.get("thoughtSignature").is_none(),
+            "thoughtSignature must NOT be inside functionCall"
+        );
+        assert_eq!(
+            part["thoughtSignature"].as_str().unwrap(),
+            "sig-get-goal-abc123",
+            "thoughtSignature must be at part level alongside functionCall"
+        );
+    }
+
+    /// Test B: Streaming — signature appears in middle chunk, later chunk
+    /// omits it. Final shadow must retain the signature.
+    #[test]
+    fn thought_signature_survives_when_later_stream_chunk_omits_it() {
+        let store = Arc::new(GeminiShadowStore::with_limits(8, 4));
+        // Use the streaming test helper from streaming_gemini
+        let chunks: Vec<String> = vec![
+            // Chunk 1: carries thoughtSignature
+            "data: {\"responseId\":\"r-stream-sig\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"call_s1\",\"name\":\"default_api:shell_command\",\"args\":{\"command\":\"ls\"}},\"thoughtSignature\":\"sig-shell-xyz789\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":6}}\n\n".to_string(),
+            // Chunk 2: cumulative update WITHOUT thoughtSignature
+            "data: {\"responseId\":\"r-stream-sig\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"call_s1\",\"name\":\"default_api:shell_command\",\"args\":{\"command\":\"ls\",\"timeout\":30}}}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":9}}\n\n".to_string(),
+        ];
+        let stream = futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(chunk))),
+        );
+        let converted = crate::proxy::providers::streaming_gemini::create_anthropic_sse_stream_from_gemini(
+            stream,
+            Some(store.clone()),
+            Some("provider-sig".to_string()),
+            Some("session-sig".to_string()),
+            None,
+        );
+        // Drain the stream to record the shadow
+        futures::executor::block_on(async move {
+            use futures::stream::StreamExt;
+            let mut pinned = Box::pin(converted);
+            while let Some(_item) = pinned.next().await {}
+        });
+
+        let shadow = store
+            .latest_assistant_content("provider-sig", "session-sig")
+            .expect("shadow must be recorded");
+        let part = &shadow["parts"][0];
+        assert_eq!(part["functionCall"]["name"], "default_api:shell_command");
+        assert_eq!(
+            part["thoughtSignature"].as_str().unwrap(),
+            "sig-shell-xyz789",
+            "thoughtSignature must survive a later cumulative chunk that omits it"
+        );
+
+        // Also verify it can be replayed back in the next request
+        let replay_input = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_s1",
+                            "name": "default_api:shell_command",
+                            "input": {"command": "ls", "timeout": 30}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_s1",
+                            "content": "file1.txt\nfile2.txt"
+                        }
+                    ]
+                }
+            ]
+        });
+        let replay = anthropic_to_gemini_with_shadow(
+            replay_input,
+            Some(store.as_ref()),
+            Some("provider-sig"),
+            Some("session-sig"),
+        )
+        .unwrap();
+        let replay_part = &replay["contents"][0]["parts"][0];
+        assert_eq!(
+            replay_part["thoughtSignature"].as_str().unwrap(),
+            "sig-shell-xyz789",
+            "replayed thoughtSignature must equal the captured one"
+        );
+    }
+
+    /// Test C: Two consecutive tool calls must not cross signatures.
+    #[test]
+    fn consecutive_tool_calls_keep_their_own_signatures() {
+        let store = GeminiShadowStore::with_limits(8, 4);
+
+        // Turn 1: get_goal
+        store.record_assistant_turn(
+            "prov-c", "sess-c",
+            json!({
+                "parts": [{
+                    "functionCall": {"id": "call_g", "name": "default_api:get_goal", "args": {}},
+                    "thoughtSignature": "sig-goal"
+                }]
+            }),
+            vec![GeminiToolCallMeta::new(
+                Some("call_g"), "default_api:get_goal", json!({}), Some("sig-goal"),
+            )],
+        );
+
+        // Turn 2: shell_command (after get_goal result)
+        store.record_assistant_turn(
+            "prov-c", "sess-c",
+            json!({
+                "parts": [{
+                    "functionCall": {"id": "call_s", "name": "default_api:shell_command", "args": {"command": "ls"}},
+                    "thoughtSignature": "sig-shell"
+                }]
+            }),
+            vec![GeminiToolCallMeta::new(
+                Some("call_s"), "default_api:shell_command", json!({"command": "ls"}), Some("sig-shell"),
+            )],
+        );
+
+        // Request includes both turns
+        let input = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_g", "name": "default_api:get_goal", "input": {}}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "call_g", "content": "goal acquired"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_s", "name": "default_api:shell_command", "input": {"command": "ls"}}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "call_s", "content": "ok"}]
+                }
+            ]
+        });
+
+        let result = anthropic_to_gemini_with_shadow(
+            input, Some(&store), Some("prov-c"), Some("sess-c"),
+        ).unwrap();
+
+        // First turn: get_goal with sig-goal
+        let p0 = &result["contents"][0]["parts"][0];
+        assert_eq!(p0["functionCall"]["name"], "default_api:get_goal");
+        assert_eq!(p0["thoughtSignature"], "sig-goal");
+        assert!(p0["functionCall"].get("thoughtSignature").is_none());
+
+        // Second turn: shell_command with sig-shell
+        let p2 = &result["contents"][2]["parts"][0];
+        assert_eq!(p2["functionCall"]["name"], "default_api:shell_command");
+        assert_eq!(p2["thoughtSignature"], "sig-shell");
+        assert!(p2["functionCall"].get("thoughtSignature").is_none());
+
+        // Signatures must NOT be swapped
+        assert_ne!(p0["thoughtSignature"], p2["thoughtSignature"]);
+    }
+
+    /// Test D: Parallel tool calls — each must have its own signature.
+    #[test]
+    fn parallel_tool_calls_each_preserve_their_signature() {
+        let store = GeminiShadowStore::with_limits(8, 4);
+        store.record_assistant_turn(
+            "prov-d", "sess-d",
+            json!({
+                "parts": [
+                    {
+                        "functionCall": {"id": "parallel_1", "name": "default_api:read_file", "args": {"path": "a.txt"}},
+                        "thoughtSignature": "sig-read-a"
+                    },
+                    {
+                        "functionCall": {"id": "parallel_2", "name": "default_api:read_file", "args": {"path": "b.txt"}},
+                        "thoughtSignature": "sig-read-b"
+                    }
+                ]
+            }),
+            vec![
+                GeminiToolCallMeta::new(Some("parallel_1"), "default_api:read_file", json!({"path": "a.txt"}), Some("sig-read-a")),
+                GeminiToolCallMeta::new(Some("parallel_2"), "default_api:read_file", json!({"path": "b.txt"}), Some("sig-read-b")),
+            ],
+        );
+
+        let input = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "parallel_1", "name": "default_api:read_file", "input": {"path": "a.txt"}},
+                        {"type": "tool_use", "id": "parallel_2", "name": "default_api:read_file", "input": {"path": "b.txt"}},
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "parallel_1", "content": "content A"},
+                        {"type": "tool_result", "tool_use_id": "parallel_2", "content": "content B"},
+                    ]
+                }
+            ]
+        });
+
+        let result = anthropic_to_gemini_with_shadow(
+            input, Some(&store), Some("prov-d"), Some("sess-d"),
+        ).unwrap();
+
+        let parts = result["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["thoughtSignature"], "sig-read-a");
+        assert_eq!(parts[1]["thoughtSignature"], "sig-read-b");
+        // Signatures must be distinct
+        assert_ne!(parts[0]["thoughtSignature"], parts[1]["thoughtSignature"]);
+    }
+
+    /// Test E: Same-name tool called twice consecutively —
+    /// each occurrence must get its own signature, not the other's.
+    #[test]
+    fn same_name_consecutive_calls_dont_share_signature() {
+        let store = GeminiShadowStore::with_limits(8, 4);
+
+        // Turn 1: shell_command (first)
+        store.record_assistant_turn(
+            "prov-e", "sess-e",
+            json!({
+                "parts": [{
+                    "functionCall": {"id": "sc_1", "name": "default_api:shell_command", "args": {"command": "pwd"}},
+                    "thoughtSignature": "sig-sc1"
+                }]
+            }),
+            vec![GeminiToolCallMeta::new(Some("sc_1"), "default_api:shell_command", json!({"command": "pwd"}), Some("sig-sc1"))],
+        );
+
+        // Turn 2: shell_command (second)
+        store.record_assistant_turn(
+            "prov-e", "sess-e",
+            json!({
+                "parts": [{
+                    "functionCall": {"id": "sc_2", "name": "default_api:shell_command", "args": {"command": "ls"}},
+                    "thoughtSignature": "sig-sc2"
+                }]
+            }),
+            vec![GeminiToolCallMeta::new(Some("sc_2"), "default_api:shell_command", json!({"command": "ls"}), Some("sig-sc2"))],
+        );
+
+        let input = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "sc_1", "name": "default_api:shell_command", "input": {"command": "pwd"}}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "sc_1", "content": "/home"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "sc_2", "name": "default_api:shell_command", "input": {"command": "ls"}}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "sc_2", "content": "ok"}]
+                }
+            ]
+        });
+
+        let result = anthropic_to_gemini_with_shadow(
+            input, Some(&store), Some("prov-e"), Some("sess-e"),
+        ).unwrap();
+
+        let p0 = &result["contents"][0]["parts"][0];
+        let p2 = &result["contents"][2]["parts"][0];
+        assert_eq!(p0["functionCall"]["name"], "default_api:shell_command");
+        assert_eq!(p2["functionCall"]["name"], "default_api:shell_command");
+        assert_eq!(p0["thoughtSignature"], "sig-sc1");
+        assert_eq!(p2["thoughtSignature"], "sig-sc2");
+        assert_ne!(p0["thoughtSignature"], p2["thoughtSignature"]);
+    }
+
+    /// Test F: Streaming retry — shadow must retain signature after error.
+    #[test]
+    fn streaming_retry_does_not_clear_signature() {
+        let store = Arc::new(GeminiShadowStore::with_limits(8, 4));
+
+        // Simulate a partial stream that errors
+        let chunks: Vec<String> = vec![
+            "data: {\"responseId\":\"r-retry\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"retry_1\",\"name\":\"default_api:apply_patch\",\"args\":{\"patch\":\"abc\"}},\"thoughtSignature\":\"sig-retry\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":6}}\n\n".to_string(),
+        ];
+        let stream = futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(chunk))),
+        );
+        let converted = crate::proxy::providers::streaming_gemini::create_anthropic_sse_stream_from_gemini(
+            stream,
+            Some(store.clone()),
+            Some("provider-retry".to_string()),
+            Some("session-retry".to_string()),
+            None,
+        );
+        futures::executor::block_on(async move {
+            use futures::stream::StreamExt;
+            let mut pinned = Box::pin(converted);
+            while let Some(_item) = pinned.next().await {}
+        });
+
+        // Verify shadow has the signature
+        let shadow = store
+            .latest_assistant_content("provider-retry", "session-retry")
+            .expect("shadow recorded");
+        assert_eq!(
+            shadow["parts"][0]["thoughtSignature"], "sig-retry",
+            "signature must survive streaming and be recorded in shadow"
+        );
+
+        // Verify tool_calls metadata also has it
+        let tool_calls = store
+            .latest_tool_calls("provider-retry", "session-retry")
+            .expect("tool calls recorded");
+        assert_eq!(tool_calls[0].thought_signature.as_deref(), Some("sig-retry"));
+
+        // A new request session should be able to replay it
+        let replay_input = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "retry_1", "name": "default_api:apply_patch", "input": {"patch": "abc"}}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "retry_1", "content": "applied"}]
+                }
+            ]
+        });
+        let replay = anthropic_to_gemini_with_shadow(
+            replay_input,
+            Some(store.as_ref()),
+            Some("provider-retry"),
+            Some("session-retry"),
+        ).unwrap();
+        let replay_part = &replay["contents"][0]["parts"][0];
+        assert_eq!(replay_part["thoughtSignature"], "sig-retry");
+        assert!(replay_part["functionCall"].get("thoughtSignature").is_none());
+    }
+
+    /// Test G: Model name with "models/" prefix must not break shadow lookup.
+    /// Model name is not part of the shadow key (provider_id, session_id),
+    /// so this test confirms the invariant holds.
+    #[test]
+    fn model_name_prefix_does_not_affect_shadow_key() {
+        let store = GeminiShadowStore::with_limits(8, 4);
+
+        // Store with a specific provider_id and session_id
+        store.record_assistant_turn(
+            "gemini-provider-001",
+            "codex-session-abc",
+            json!({
+                "parts": [{
+                    "functionCall": {"id": "m1", "name": "default_api:get_goal", "args": {}},
+                    "thoughtSignature": "sig-model-test"
+                }]
+            }),
+            vec![GeminiToolCallMeta::new(
+                Some("m1"), "default_api:get_goal", json!({}), Some("sig-model-test"),
+            )],
+        );
+
+        // Lookup with the same provider/session should work regardless of model
+        let shadow = store
+            .get_session("gemini-provider-001", "codex-session-abc")
+            .expect("shadow found");
+        assert_eq!(shadow.turns.len(), 1);
+        assert_eq!(
+            shadow.turns[0].tool_calls[0].thought_signature.as_deref(),
+            Some("sig-model-test")
+        );
+
+        // Different provider_id should NOT find it
+        assert!(store
+            .get_session("other-provider", "codex-session-abc")
+            .is_none());
+        // Different session_id should NOT find it
+        assert!(store
+            .get_session("gemini-provider-001", "other-session")
+            .is_none());
     }
 }
