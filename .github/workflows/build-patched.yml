@@ -1,0 +1,41 @@
+name: Build Patched EXE
+
+on:
+  push:
+    branches:
+      - fix/thought-signature
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cd src-tauri
+          cargo build --release
+          Write-Host "Build complete"
+          $exe = Get-Item target/release/cc-switch.exe
+          Write-Host "EXE: $($exe.FullName)"
+          Write-Host "Size: $($exe.Length) bytes"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: cc-switch-patched
+          path: src-tauri/target/release/cc-switch.exe
