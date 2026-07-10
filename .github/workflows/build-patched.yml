@@ -22,16 +22,26 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+
+      - name: Install frontend deps
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Release
+      - name: Build Tauri (frontend + backend)
+        shell: pwsh
+        run: pnpm tauri build --config src-tauri/tauri.conf.json 2>&1
+
+      - name: Find and upload EXE
         shell: pwsh
         run: |
-          cd src-tauri
-          cargo build --release
-          Write-Host "Build complete"
-          $exe = Get-Item target/release/cc-switch.exe
+          $exe = Get-ChildItem -Recurse -Filter "cc-switch.exe" | Where-Object { $_.FullName -like "*release*" } | Select-Object -First 1
           Write-Host "EXE: $($exe.FullName)"
           Write-Host "Size: $($exe.Length) bytes"
 
