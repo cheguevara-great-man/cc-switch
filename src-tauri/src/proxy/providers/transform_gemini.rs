@@ -1178,6 +1178,7 @@ fn map_finish_reason(reason: Option<&str>, has_tool_use: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn anthropic_to_gemini_maps_system_and_messages() {

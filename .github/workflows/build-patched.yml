@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - fix/thought-signature
-      - codex/fanvpn-integration
   pull_request:
     branches:
       - fix/thought-signature
