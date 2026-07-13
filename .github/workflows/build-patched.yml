@@ -37,9 +37,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Test Rust library (including Gemini thought signatures)
+      - name: Test Gemini conversion and thought signatures
         shell: pwsh
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::providers::transform_gemini::tests
+          cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::providers::streaming_gemini::tests
 
       - name: Build Tauri (frontend + backend)
         shell: pwsh
