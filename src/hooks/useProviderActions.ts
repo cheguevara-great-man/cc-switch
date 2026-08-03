@@ -165,6 +165,9 @@ export function useProviderActions(
                 (provider.settingsConfig as Record<string, any>).config,
               ),
             )));
+      const isBrowserBridgeProvider =
+        activeApp === "codex" &&
+        provider.meta?.providerType === "browser_ai_bridge";
 
       // Determine why this provider requires the proxy
       let proxyRequiredReason: string | null = null;
@@ -219,7 +222,11 @@ export function useProviderActions(
       }
 
       // Block official providers when proxy takeover is active
-      if (isProxyTakeover && provider.category === "official") {
+      if (
+        isProxyTakeover &&
+        provider.category === "official" &&
+        !isBrowserBridgeProvider
+      ) {
         toast.error(
           t("notifications.officialBlockedByProxy", {
             defaultValue:

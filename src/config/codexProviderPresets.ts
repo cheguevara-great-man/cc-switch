@@ -36,6 +36,8 @@ export interface CodexProviderPreset {
   modelCatalog?: CodexCatalogModel[];
   // Codex Responses -> Chat Completions reasoning capability defaults
   codexChatReasoning?: CodexChatReasoning;
+  // Special runtime behavior owned by this fork (for example Browser Bridge).
+  providerType?: string;
 }
 
 /**
@@ -116,6 +118,29 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     },
     icon: "openai",
     iconColor: "#00A67E",
+  },
+  {
+    name: "OpenAI Login (Browser Bridge)",
+    websiteUrl: "https://chatgpt.com/codex",
+    isOfficial: true,
+    category: "official",
+    auth: {},
+    config: `model_provider = "browser_ai_bridge"
+
+[model_providers.browser_ai_bridge]
+name = "ChatGPT Codex through Browser AI Bridge"
+base_url = "http://127.0.0.1:18888/chatgpt-codex"
+requires_openai_auth = true
+wire_api = "responses"
+supports_websockets = false`,
+    providerType: "browser_ai_bridge",
+    theme: {
+      icon: "codex",
+      backgroundColor: "#173B68",
+      textColor: "#FFFFFF",
+    },
+    icon: "openai",
+    iconColor: "#2563EB",
   },
   {
     name: "Shengsuanyun",

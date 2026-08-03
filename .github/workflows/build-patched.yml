@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/thought-signature
+  pull_request:
+    branches:
+      - fix/thought-signature
   workflow_dispatch:
 
 permissions:
@@ -34,9 +37,18 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Test Gemini conversion and thought signatures
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::providers::transform_gemini::tests
+          cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::providers::streaming_gemini::tests
+
       - name: Build Tauri (frontend + backend)
         shell: pwsh
-        run: pnpm tauri build --config src-tauri/tauri.conf.json 2>&1
+        # Build the embedded frontend and Rust backend, but skip MSI/NSIS
+        # bundling because this private patch branch does not own the upstream
+        # Tauri updater signing key.
+        run: pnpm tauri build --no-bundle --config src-tauri/tauri.conf.json 2>&1
 
       - name: Find and upload EXE
         shell: pwsh

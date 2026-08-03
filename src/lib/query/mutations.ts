@@ -257,6 +257,17 @@ export const useSwitchProviderMutation = (appId: AppId) => {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+      if (appId === "codex") {
+        // Selecting the Browser Bridge provider can atomically leave Codex
+        // proxy takeover, so refresh the proxy badges/buttons immediately.
+        await queryClient.invalidateQueries({
+          queryKey: ["proxyTakeoverStatus"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["liveTakeoverActive"],
+        });
+        await queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      }
       if (appId === "claude-desktop") {
         await queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
         await queryClient.invalidateQueries({

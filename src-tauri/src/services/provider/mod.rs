@@ -20,6 +20,93 @@ use crate::services::mcp::McpService;
 use crate::settings::CustomEndpoint;
 use crate::store::AppState;
 
+const CODEX_BROWSER_BRIDGE_PROVIDER_ID: &str = "codex-browser-bridge";
+const CODEX_BROWSER_BRIDGE_PROVIDER_TYPE: &str = "browser_ai_bridge";
+const CODEX_BROWSER_BRIDGE_BASE_URL: &str = "http://127.0.0.1:18888/chatgpt-codex";
+const CODEX_BROWSER_BRIDGE_CONFIG: &str = r#"model_provider = "browser_ai_bridge"
+
+[model_providers.browser_ai_bridge]
+name = "ChatGPT Codex through Browser AI Bridge"
+base_url = "http://127.0.0.1:18888/chatgpt-codex"
+requires_openai_auth = true
+wire_api = "responses"
+supports_websockets = false
+"#;
+
+fn codex_provider_is_browser_bridge(provider: &Provider) -> bool {
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some(CODEX_BROWSER_BRIDGE_PROVIDER_TYPE)
+    {
+        return true;
+    }
+
+    provider
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .and_then(crate::codex_config::extract_codex_base_url)
+        .map(|base_url| base_url.trim_end_matches('/') == CODEX_BROWSER_BRIDGE_BASE_URL)
+        .unwrap_or(false)
+}
+
+/// Ensure every installation has a credential-free, one-click way back to the
+/// ChatGPT login transported by Browser AI Bridge.
+///
+/// Older FanVPN builds imported that route as the generic `default` provider.
+/// Upgrade that row in place so its current/sort identity is preserved. If the
+/// user's `default` is unrelated, add a dedicated provider instead.
+pub fn ensure_codex_browser_bridge_provider(state: &AppState) -> Result<String, AppError> {
+    let providers = state.db.get_all_providers(AppType::Codex.as_str())?;
+    let target_id = providers
+        .get("default")
+        .filter(|provider| codex_provider_is_browser_bridge(provider))
+        .map(|_| "default")
+        .unwrap_or(CODEX_BROWSER_BRIDGE_PROVIDER_ID);
+
+    if let Some(existing) = providers.get(target_id) {
+        if target_id != "default" || codex_provider_is_browser_bridge(existing) {
+            let mut provider = existing.clone();
+            provider.name = "OpenAI Login (Browser Bridge)".to_string();
+            provider.website_url = Some("https://chatgpt.com/codex".to_string());
+            provider.category = Some("official".to_string());
+            provider.settings_config = serde_json::json!({
+                "auth": {},
+                "config": CODEX_BROWSER_BRIDGE_CONFIG,
+            });
+            provider.icon = Some("openai".to_string());
+            provider.icon_color = Some("#00A67E".to_string());
+            provider
+                .meta
+                .get_or_insert_with(Default::default)
+                .provider_type = Some(CODEX_BROWSER_BRIDGE_PROVIDER_TYPE.to_string());
+            state.db.save_provider(AppType::Codex.as_str(), &provider)?;
+            return Ok(target_id.to_string());
+        }
+    }
+
+    let mut provider = Provider::with_id(
+        CODEX_BROWSER_BRIDGE_PROVIDER_ID.to_string(),
+        "OpenAI Login (Browser Bridge)".to_string(),
+        serde_json::json!({
+            "auth": {},
+            "config": CODEX_BROWSER_BRIDGE_CONFIG,
+        }),
+        Some("https://chatgpt.com/codex".to_string()),
+    );
+    provider.category = Some("official".to_string());
+    provider.icon = Some("openai".to_string());
+    provider.icon_color = Some("#00A67E".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        provider_type: Some(CODEX_BROWSER_BRIDGE_PROVIDER_TYPE.to_string()),
+        ..Default::default()
+    });
+    state.db.save_provider(AppType::Codex.as_str(), &provider)?;
+    Ok(CODEX_BROWSER_BRIDGE_PROVIDER_ID.to_string())
+}
+
 // Re-export sub-module functions for external access
 pub use live::{
     import_default_config, import_hermes_providers_from_live, import_openclaw_providers_from_live,
@@ -237,6 +324,69 @@ mod tests {
         }
 
         result
+    }
+
+    #[test]
+    #[serial]
+    fn browser_bridge_provider_upgrades_legacy_default_without_stored_oauth() {
+        with_test_home(|state, _| {
+            let mut legacy = Provider::with_id(
+                "default".to_string(),
+                "default".to_string(),
+                json!({
+                    "auth": {
+                        "auth_mode": "chatgpt",
+                        "tokens": { "access_token": "stale-token" }
+                    },
+                    "config": r#"model_provider = "fanvpn_chatgpt"
+
+[model_providers.fanvpn_chatgpt]
+base_url = "http://127.0.0.1:18888/chatgpt-codex"
+requires_openai_auth = true
+wire_api = "responses"
+"#
+                }),
+                None,
+            );
+            legacy.category = Some("official".to_string());
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &legacy)
+                .expect("seed legacy provider");
+
+            let id = ensure_codex_browser_bridge_provider(state)
+                .expect("upgrade legacy Browser Bridge provider");
+            assert_eq!(id, "default");
+
+            let upgraded = state
+                .db
+                .get_provider_by_id("default", AppType::Codex.as_str())
+                .expect("query upgraded provider")
+                .expect("upgraded provider exists");
+            assert_eq!(upgraded.name, "OpenAI Login (Browser Bridge)");
+            assert_eq!(
+                upgraded
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.provider_type.as_deref()),
+                Some(CODEX_BROWSER_BRIDGE_PROVIDER_TYPE)
+            );
+            assert_eq!(upgraded.settings_config.get("auth"), Some(&json!({})));
+            assert!(
+                upgraded
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .is_some_and(|config| config.contains(CODEX_BROWSER_BRIDGE_BASE_URL)),
+                "canonical provider should point to Browser Bridge"
+            );
+            assert!(
+                !serde_json::to_string(&upgraded.settings_config)
+                    .expect("serialize settings")
+                    .contains("stale-token"),
+                "provider storage must not retain a stale ChatGPT access token"
+            );
+        });
     }
 
     fn codex_settings(base_url: &str, api_key: &str) -> Value {
@@ -2342,7 +2492,23 @@ impl ProviderService {
 
         let should_hot_switch = is_app_taken_over || live_taken_over;
 
-        // Block switching to official providers when proxy takeover is active.
+        let is_browser_bridge_target =
+            matches!(app_type, AppType::Codex) && codex_provider_is_browser_bridge(_provider);
+
+        // Browser Bridge is a safe escape hatch from Codex takeover: restore
+        // the pre-takeover live files first, then let the normal switch path
+        // write the loopback provider while preserving ChatGPT auth.json.
+        if should_hot_switch && is_browser_bridge_target {
+            state
+                .proxy_service
+                .disable_takeover_for_app_sync(&AppType::Codex)
+                .map_err(|e| {
+                    AppError::Message(format!("切回 Browser Bridge 前关闭 Codex 接管失败: {e}"))
+                })?;
+            return Self::switch_normal(state, app_type, id, &providers);
+        }
+
+        // Block switching to other official providers when proxy takeover is active.
         // Using a proxy with official APIs (Anthropic/OpenAI/Google) may cause account bans.
         if should_hot_switch && _provider.category.as_deref() == Some("official") {
             return Err(AppError::localized(

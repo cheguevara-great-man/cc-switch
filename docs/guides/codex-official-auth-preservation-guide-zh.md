@@ -26,6 +26,13 @@ v3.16.0 就有这个功能，并且默认开启，但是部分用户反映并不
 5. 如果该供应商是 Chat Completions 协议，例如 DeepSeek / Kimi / MiniMax，需要同时开启本地路由并启用 Codex 接管。
 6. 重启 Codex，让 `config.toml` 和模型目录重新加载。
 
+如果你的电脑同时部署了 Browser AI Bridge，还会看到内置供应商
+`OpenAI Login (Browser Bridge)`。从任意第三方 API 切回账号登录时，直接启用这个
+供应商即可：CC Switch 会自动关闭**仅 Codex**的本地路由接管，保留
+`~/.codex/auth.json`，并把 Codex 改回
+`http://127.0.0.1:18888/chatgpt-codex`。不需要先手工关闭接管，也不会关闭 Claude
+的路由；切换后重启 Codex 生效。
+
 ![设置里的 Codex 应用增强开关](../images/codex-official-auth-preservation/01-codex-app-enhancement-setting.png)
 
 ## 准备工作
@@ -194,7 +201,10 @@ Codex 的模型目录是启动时读取的。即使 CC Switch 已经生成了新
 
 **可以在本地路由模式下切回 OpenAI Official 吗？**
 
-不建议。CC Switch 会尽量阻止在本地路由接管模式下切到官方供应商，因为用代理访问官方 API 可能带来账号风险。建议官方登录只用于保留 `auth.json`，模型流量则切到第三方供应商。
+普通的 `OpenAI Official` 仍会被阻止，因为它会直接访问官方地址。如果已经部署
+Browser AI Bridge，请改选 `OpenAI Login (Browser Bridge)`：这是专门的一键退出
+Codex 接管入口，会保留官方登录并把模型请求交给 Browser Bridge。Bridge 未运行或
+Chrome 执行器未连接时，这条链路仍然无法发送消息。
 
 **为什么流程做的这么复杂？可以简化吗？**
 
