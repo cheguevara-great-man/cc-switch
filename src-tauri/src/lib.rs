@@ -603,6 +603,11 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
+            match crate::services::provider::ensure_codex_browser_bridge_provider(&app_state) {
+                Ok(id) => log::info!("✓ Browser Bridge Codex provider ready: {id}"),
+                Err(e) => log::warn!("✗ Failed to prepare Browser Bridge Codex provider: {e}"),
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {

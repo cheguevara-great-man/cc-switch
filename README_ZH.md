@@ -289,6 +289,10 @@ CC Switch macOS 版本已通过 Apple 代码签名和公证，可直接下载安
 
 可以在预设供应商里面添加一个官方供应商。切换过去之后，执行一遍 Log out / Log in 流程，之后便可以在官方供应商和第三方供应商之间随意切换。CodeX 可以在不同官方供应商之间进行切换，方便多个 Plus 或者 Team 账号之间切换。
 
+本分支同时内置 `OpenAI Login (Browser Bridge)`：已部署 Browser AI Bridge 的电脑可
+直接启用它。即使 Codex 正由 CC Switch 本地路由接管，也会自动只解除 Codex 接管、
+保留现有官方登录，并切回 `127.0.0.1:18888/chatgpt-codex`；随后重启 Codex 即可。
+
 </details>
 
 <details>

@@ -286,6 +286,11 @@ CC Switch follows a "minimal intrusion" design principle — even if you uninsta
 
 Add an official provider from the preset list. After switching to it, run the Log out / Log in flow, and then you can freely switch between the official provider and third-party providers. Codex supports switching between different official providers, making it easy to switch between multiple Plus or Team accounts.
 
+This branch also includes `OpenAI Login (Browser Bridge)`. On a computer with
+Browser AI Bridge installed, selecting it automatically disables Codex-only
+local-route takeover, preserves the existing official login, and switches Codex
+back to `127.0.0.1:18888/chatgpt-codex`. Restart Codex afterward.
+
 </details>
 
 <details>

@@ -704,6 +704,139 @@ wire_api = "responses"
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "this integration-style test must serialize global test HOME and settings mutations across async takeover calls"
+)]
+async fn codex_browser_bridge_switch_exits_takeover_and_preserves_official_login() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    enable_codex_official_auth_preservation();
+    let _home = ensure_test_home();
+
+    let oauth_auth = json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": "oauth-access",
+            "id_token": "oauth-id"
+        }
+    });
+    write_codex_live_atomic(
+        &oauth_auth,
+        Some(
+            r#"model_provider = "deepseek"
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#,
+        ),
+    )
+    .expect("seed third-party Codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "deepseek-provider".to_string();
+
+        let mut deepseek = Provider::with_id(
+            "deepseek-provider".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "deepseek-key"},
+                "config": r#"model_provider = "deepseek"
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        deepseek.category = Some("custom".to_string());
+        manager
+            .providers
+            .insert("deepseek-provider".to_string(), deepseek);
+
+        let mut bridge = Provider::with_id(
+            "browser-bridge".to_string(),
+            "OpenAI Login (Browser Bridge)".to_string(),
+            json!({
+                "auth": {},
+                "config": r#"model_provider = "browser_ai_bridge"
+[model_providers.browser_ai_bridge]
+name = "ChatGPT Codex through Browser AI Bridge"
+base_url = "http://127.0.0.1:18888/chatgpt-codex"
+requires_openai_auth = true
+wire_api = "responses"
+supports_websockets = false
+"#
+            }),
+            None,
+        );
+        bridge.category = Some("official".to_string());
+        bridge.meta = Some(ProviderMeta {
+            provider_type: Some("browser_ai_bridge".to_string()),
+            ..Default::default()
+        });
+        manager
+            .providers
+            .insert("browser-bridge".to_string(), bridge);
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let mut proxy_config = state.db.get_proxy_config().await.expect("get proxy config");
+    proxy_config.listen_port = 0;
+    state
+        .db
+        .update_proxy_config(proxy_config)
+        .await
+        .expect("use ephemeral proxy port");
+
+    state
+        .proxy_service
+        .set_takeover_for_app("codex", true)
+        .await
+        .expect("enable Codex takeover");
+
+    ProviderService::switch(&state, AppType::Codex, "browser-bridge")
+        .expect("Browser Bridge switch should leave takeover safely");
+
+    let codex_proxy_config = state
+        .db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("read Codex proxy config");
+    assert!(
+        !codex_proxy_config.enabled,
+        "Browser Bridge selection must disable Codex takeover"
+    );
+    assert!(
+        state
+            .db
+            .get_live_backup("codex")
+            .await
+            .expect("read backup")
+            .is_none(),
+        "Browser Bridge selection must consume and remove the takeover backup"
+    );
+
+    let live_auth: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read preserved auth");
+    assert_eq!(
+        live_auth, oauth_auth,
+        "switching back to Browser Bridge must preserve ChatGPT OAuth auth.json"
+    );
+
+    let live_config = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+        .expect("read Browser Bridge config");
+    assert!(live_config.contains("http://127.0.0.1:18888/chatgpt-codex"));
+    assert!(live_config.contains("requires_openai_auth = true"));
+    assert!(!live_config.contains("PROXY_MANAGED"));
+    assert!(!live_config.contains("127.0.0.1:15721"));
+}
+
 #[test]
 fn provider_service_switch_codex_default_overwrites_official_auth_when_preservation_off() {
     let _guard = test_mutex().lock().expect("acquire test mutex");

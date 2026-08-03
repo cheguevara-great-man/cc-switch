@@ -26,6 +26,13 @@ Recommended order:
 5. If the provider uses the Chat Completions protocol, such as DeepSeek / Kimi / MiniMax, also enable local routing and route Codex through it.
 6. Restart Codex so `config.toml` and the model catalog are reloaded.
 
+When Browser AI Bridge is installed, CC Switch also provides an
+`OpenAI Login (Browser Bridge)` provider. Select it to return from any API
+provider to ChatGPT account login in one action. CC Switch disables takeover
+for Codex only, preserves `~/.codex/auth.json`, and writes
+`http://127.0.0.1:18888/chatgpt-codex`. Claude routing is not changed. Restart
+Codex after switching.
+
 ![Codex App Enhancements switch in Settings](../images/codex-official-auth-preservation/01-codex-app-enhancement-setting.png)
 
 ## Prerequisites
