@@ -153,11 +153,25 @@ fn launch_codex_browser_full_impl() -> Result<(), String> {
     if !launcher.is_file() {
         return Err("Update Browser AI Bridge before using one-click Browser Full".to_string());
     }
-    let powershell = PathBuf::from(env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
+    let mode_configurator = launcher
+        .parent()
+        .ok_or_else(|| "The registered Browser AI Bridge path is invalid".to_string())?
+        .join("set_codex_network_mode.ps1");
+    let mode_configurator_source = fs::read_to_string(&mode_configurator).map_err(|_| {
+        "Update Browser AI Bridge to 3.4.1 or newer before using one-click Browser Full".to_string()
+    })?;
+    if !mode_configurator_source.contains("CC Switch stores a complete provider table") {
+        return Err(
+            "Update Browser AI Bridge to 3.4.1 or newer before using one-click Browser Full"
+                .to_string(),
+        );
+    }
+    let powershell =
+        PathBuf::from(env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
     let output = Command::new(powershell)
         .args([
             "-NoProfile",
@@ -174,7 +188,10 @@ fn launch_codex_browser_full_impl() -> Result<(), String> {
         return Ok(());
     }
     if output.status.code() == Some(23) {
-        return Err("Close every VS Code window, then select OpenAI Login (Browser Bridge) again".to_string());
+        return Err(
+            "Close every VS Code window, then select OpenAI Login (Browser Bridge) again"
+                .to_string(),
+        );
     }
     let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(if detail.is_empty() {
