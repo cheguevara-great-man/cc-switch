@@ -132,7 +132,10 @@ name = "ChatGPT Codex through Browser AI Bridge"
 base_url = "http://127.0.0.1:18888/chatgpt-codex"
 requires_openai_auth = true
 wire_api = "responses"
-supports_websockets = false`,
+supports_websockets = false
+
+[windows]
+sandbox = "unelevated"`,
     providerType: "browser_ai_bridge",
     theme: {
       icon: "codex",

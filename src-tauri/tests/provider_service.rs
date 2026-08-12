@@ -771,6 +771,9 @@ base_url = "http://127.0.0.1:18888/chatgpt-codex"
 requires_openai_auth = true
 wire_api = "responses"
 supports_websockets = false
+
+[windows]
+sandbox = "unelevated"
 "#
             }),
             None,
@@ -833,6 +836,7 @@ supports_websockets = false
         .expect("read Browser Bridge config");
     assert!(live_config.contains("http://127.0.0.1:18888/chatgpt-codex"));
     assert!(live_config.contains("requires_openai_auth = true"));
+    assert!(live_config.contains("sandbox = \"unelevated\""));
     assert!(!live_config.contains("PROXY_MANAGED"));
     assert!(!live_config.contains("127.0.0.1:15721"));
 }

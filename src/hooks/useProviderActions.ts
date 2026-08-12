@@ -241,6 +241,18 @@ export function useProviderActions(
         const result = await switchProviderMutation.mutateAsync(provider.id);
         await syncClaudePlugin(provider);
 
+        if (isBrowserBridgeProvider) {
+          try {
+            await providersApi.launchCodexBrowserFull();
+          } catch (launchError) {
+            toast.warning(
+              extractErrorMessage(launchError) ||
+                "OpenAI configuration was saved, but Browser Full could not start. Close VS Code and click Full in Browser AI Bridge.",
+              { duration: 8000 },
+            );
+          }
+        }
+
         // Show backfill warning if present
         if (result?.warnings?.length) {
           toast.warning(

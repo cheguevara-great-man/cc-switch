@@ -11,6 +11,11 @@ use crate::services::{
 use crate::store::AppState;
 use std::str::FromStr;
 
+#[cfg(target_os = "windows")]
+use std::{env, fs, path::PathBuf, process::Command};
+#[cfg(target_os = "windows")]
+use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+
 // 常量定义
 const TEMPLATE_TYPE_GITHUB_COPILOT: &str = "github_copilot";
 const TEMPLATE_TYPE_TOKEN_PLAN: &str = "token_plan";
@@ -107,6 +112,81 @@ pub fn switch_provider(
 ) -> Result<SwitchResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     switch_provider_internal(&state, app_type, &id).map_err(|e| e.to_string())
+}
+
+/// Launch VS Code through Browser AI Bridge's packaged Browser Full launcher.
+/// The launcher itself verifies that every existing VS Code process is closed,
+/// updates the managed Codex/VS Code settings transactionally, injects the
+/// per-process connector token, and starts the new VS Code process.
+#[tauri::command]
+pub fn launch_codex_browser_full() -> Result<(), String> {
+    launch_codex_browser_full_impl()
+}
+
+#[cfg(target_os = "windows")]
+fn launch_codex_browser_full_impl() -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey(r"Software\Google\Chrome\NativeMessagingHosts\com.fanvpn.bridge")
+        .map_err(|_| "Browser AI Bridge is not registered for Chrome".to_string())?;
+    let manifest_path: String = key
+        .get_value("")
+        .map_err(|_| "Browser AI Bridge registration has no manifest path".to_string())?;
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .map_err(|_| "Browser AI Bridge Native Host manifest cannot be read".to_string())?,
+    )
+    .map_err(|_| "Browser AI Bridge Native Host manifest is invalid".to_string())?;
+    if manifest.get("name").and_then(serde_json::Value::as_str) != Some("com.fanvpn.bridge") {
+        return Err("Browser AI Bridge Native Host manifest has the wrong name".to_string());
+    }
+    let executable = manifest
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| "Browser AI Bridge Native Host manifest has no executable".to_string())?;
+    let launcher = executable
+        .parent()
+        .ok_or_else(|| "Browser AI Bridge executable path is invalid".to_string())?
+        .join("tools")
+        .join("start_vscode_network_mode.ps1");
+    if !launcher.is_file() {
+        return Err("Update Browser AI Bridge before using one-click Browser Full".to_string());
+    }
+    let powershell = PathBuf::from(env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let output = Command::new(powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&launcher)
+        .args(["-Mode", "BrowserFull"])
+        .output()
+        .map_err(|_| "Browser Full launcher could not be started".to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    if output.status.code() == Some(23) {
+        return Err("Close every VS Code window, then select OpenAI Login (Browser Bridge) again".to_string());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if detail.is_empty() {
+        "Browser Full launcher failed; use the Bridge extension Full button".to_string()
+    } else {
+        format!("Browser Full launcher failed: {detail}")
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launch_codex_browser_full_impl() -> Result<(), String> {
+    Err("One-click Browser Full launch is currently available on Windows only".to_string())
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {

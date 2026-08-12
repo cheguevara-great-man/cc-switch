@@ -31,6 +31,9 @@ base_url = "http://127.0.0.1:18888/chatgpt-codex"
 requires_openai_auth = true
 wire_api = "responses"
 supports_websockets = false
+
+[windows]
+sandbox = "unelevated"
 "#;
 
 fn codex_provider_is_browser_bridge(provider: &Provider) -> bool {
@@ -379,6 +382,14 @@ wire_api = "responses"
                     .and_then(Value::as_str)
                     .is_some_and(|config| config.contains(CODEX_BROWSER_BRIDGE_BASE_URL)),
                 "canonical provider should point to Browser Bridge"
+            );
+            assert!(
+                upgraded
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .is_some_and(|config| config.contains("sandbox = \"unelevated\"")),
+                "canonical provider should remain usable when enterprise policy blocks elevated setup"
             );
             assert!(
                 !serde_json::to_string(&upgraded.settings_config)

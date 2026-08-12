@@ -91,6 +91,10 @@ export const providersApi = {
     return await invoke("switch_provider", { id, app: appId });
   },
 
+  async launchCodexBrowserFull(): Promise<void> {
+    await invoke("launch_codex_browser_full");
+  },
+
   async importDefault(appId: AppId): Promise<boolean> {
     return await invoke("import_default_config", { app: appId });
   },
