@@ -27,11 +27,14 @@ v3.16.0 就有这个功能，并且默认开启，但是部分用户反映并不
 6. 重启 Codex，让 `config.toml` 和模型目录重新加载。
 
 如果你的电脑同时部署了 Browser AI Bridge，还会看到内置供应商
-`OpenAI Login (Browser Bridge)`。从任意第三方 API 切回账号登录时，直接启用这个
-供应商即可：CC Switch 会自动关闭**仅 Codex**的本地路由接管，保留
-`~/.codex/auth.json`，并把 Codex 改回
-`http://127.0.0.1:18888/chatgpt-codex`。不需要先手工关闭接管，也不会关闭 Claude
-的路由；切换后重启 Codex 生效。
+`OpenAI Login (Browser Bridge)`。从任意第三方 API 切回账号登录时，请先完全关闭 VS Code，再启用
+这个供应商。CC Switch 会自动关闭**仅 Codex**的本地路由接管，保留 `~/.codex/auth.json`，清除
+第三方 API Key，并把模型请求改回 `http://127.0.0.1:18888/chatgpt-codex`；不会关闭 Claude 的路由。
+
+Windows 版 CC Switch 还会从 Chrome 当前注册的 Native Host 自动定位 Browser AI Bridge 3.4.1+ 的
+Browser Full 启动器；成功后会带入完整插件/Apps 所需的本次进程环境并自动打开 VS Code。若 Bridge
+未更新、未注册或 VS Code 仍在运行，配置切换仍然保留；关闭 VS Code 后在 Bridge 扩展中点击
+“浏览器完整”即可。
 
 ![设置里的 Codex 应用增强开关](../images/codex-official-auth-preservation/01-codex-app-enhancement-setting.png)
 
